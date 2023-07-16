@@ -1,0 +1,13 @@
+build
+results
+.idea
+__pycache__
+.vscode
+venv
+MUJOCO_LOG.TXT
+*.*prof
+outcmaes
+wandb
+*.pkl
+*.swp
+*.blend1
