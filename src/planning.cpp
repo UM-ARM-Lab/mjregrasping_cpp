@@ -45,11 +45,6 @@ int main(int argc, char **argv) {
   visual_tools.deleteAllMarkers();
 
   auto planning_scene = std::make_shared<planning_scene::PlanningScene>(robot_model);
-  // FIXME: saying the start state is invalid?
-//  planning_scene->getCurrentStateNonConst().setToDefaultValues(jmg, "home");
-  planning_scene->getCurrentStateNonConst().setToDefaultValues();
-  //  std::vector<double> q(state.getVariableCount(), 0.0);
-  //  planning_scene->getCurrentStateNonConst().setVariablePositions(q);
 
   // Solve IK
   auto opts = std::make_unique<bio_ik::BioIKKinematicsQueryOptions>();
@@ -59,10 +54,12 @@ int main(int argc, char **argv) {
   opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>("right_tool", tf2::Vector3(0.8, -0.2, 0.7)));
 
   robot_state::RobotState state(robot_model);
-  state.setToDefaultValues();
-  state.update();
+  // NOTE q could be passed in
+  std::vector<double> q(state.getVariableCount(), 0.0);
+  planning_scene->getCurrentStateNonConst().setVariablePositions(q);
+  state.update();  // update FK
 
-  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
+  const moveit::core::JointModelGroup *jmg = state.getJointModelGroup(group_name);
 
   moveit::core::GroupStateValidityCallbackFn state_valid_cb =
       [](moveit::core::RobotState *robot_state, const moveit::core::JointModelGroup *joint_group,
