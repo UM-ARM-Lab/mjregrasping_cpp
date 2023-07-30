@@ -7,8 +7,7 @@ using namespace Eigen;
 using namespace arc_utilities;
 using namespace arc_utilities::FirstOrderDeformation;
 
-// FIXME: this is copying the SDF every time, which could be slow!
-std::vector<ConfigType> getFirstOrderHomotopyPoints(sdf_tools::SignedDistanceField const &sdf, const VectorVector3d& b1, const VectorVector3d& b2, const double sdf_threshold=0.0) {
+std::vector<ConfigType> getFirstOrderHomotopyPoints(const std::function<bool(Vector3d)> & is_collision, const VectorVector3d& b1, const VectorVector3d& b2) {
     static const double one_div_min_step_size = 50.0;
 
     // Checks if the straight line between elements of the two paths is collision free.
@@ -33,7 +32,7 @@ std::vector<ConfigType> getFirstOrderHomotopyPoints(sdf_tools::SignedDistanceFie
         {
             const double ratio = (double)ind / (double)num_steps;
             const Vector3d interpolated_point = Interpolate(b1_node, b2_node, ratio);
-            if (sdf.GetImmutable3d(interpolated_point).first < sdf_threshold)
+            if (is_collision(interpolated_point))
             {
                 return false;
             }

@@ -3,21 +3,22 @@ project(mjregrasping_cpp)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CATKIN_DEPENDS
-  arc_utilities
-  moveit_core
-  moveit_visual_tools
-  pybind11_catkin
-  sdf_tools
-  roscpp
-)
+        arc_utilities
+        bio_ik
+        moveit_core
+        moveit_visual_tools
+        pybind11_catkin
+        sdf_tools
+        roscpp
+        )
 
 find_package(catkin REQUIRED COMPONENTS ${CATKIN_DEPENDS})
 
 catkin_python_setup()
 
 catkin_package(
-  INCLUDE_DIRS include
-  CATKIN_DEPENDS ${CATKIN_DEPENDS}
+        INCLUDE_DIRS include
+        CATKIN_DEPENDS ${CATKIN_DEPENDS}
 )
 
 set(FLAGS -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror=return-type -Werror=missing-field-initializers -Wno-unknown-pragmas)

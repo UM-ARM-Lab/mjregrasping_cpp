@@ -15,6 +15,7 @@
   <depend>moveit_visual_tools</depend>
   <depend>pybind11_catkin</depend>
   <depend>roscpp</depend>
+  <depend>bio_ik</depend>
   <depend>sdf_tools</depend>
   <depend>rospy</depend>
 </package>
