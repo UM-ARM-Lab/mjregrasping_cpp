@@ -1,8 +1,8 @@
 #include <bio_ik/bio_ik.h>
 #include <mjregrasping/planning.h>
 #include <moveit/kinematic_constraints/utils.h>
-#include <moveit/robot_state/conversions.h>
 #include <moveit_msgs/DisplayTrajectory.h>
+#include <ompl/util/RandomNumbers.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 constexpr auto LOGNAME = "planning";
@@ -10,6 +10,20 @@ constexpr auto LOGNAME = "planning";
 namespace rvt = rviz_visual_tools;
 
 constexpr double deg2rad(double deg) { return deg * M_PI / 180.0; }
+
+void seedOmpl(int seed) { ompl::RNG::setSeed(seed); }
+
+void wait_for_connection(ros::Publisher const &pub) {
+  auto const t0 = ros::Time::now();
+  while (pub.getNumSubscribers() < 1) {
+    ROS_DEBUG_STREAM_NAMED(LOGNAME, "Waiting for subscriber on topic " << pub.getTopic());
+    auto const dt = ros::Time::now() - t0;
+    if (dt > ros::Duration(5)) {
+      break;
+    }
+    ros::Duration(0.1).sleep();
+  }
+}
 
 RRTPlanner::RRTPlanner() {
   ros::AsyncSpinner spinner(1);
@@ -24,40 +38,73 @@ RRTPlanner::RRTPlanner() {
 
   visual_tools = std::make_shared<moveit_visual_tools::MoveItVisualTools>("robot_root");
   visual_tools->deleteAllMarkers();
+
+  ik_traj_pub = nh.advertise<moveit_msgs::DisplayTrajectory>("ik_traj", 10);
+  sln_traj_pub = nh.advertise<moveit_msgs::DisplayTrajectory>("display_planned_path", 10);
+  scene_pub = nh.advertise<moveit_msgs::PlanningScene>("scene_viz", 10);
 }
 
-moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene const &scene_msg,
-                                                 std::string const &group_name,
-                                                 std::map<std::string, Eigen::Vector3d> const &goal_positions) {
+moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
+                                                 std::map<std::string, Eigen::Vector3d> const &goal_positions,
+                                                 bool viz, double allowed_planning_time) {
   auto planning_scene = std::make_shared<planning_scene::PlanningScene>(robot_model);
+
+  // The planning scene will automatically pull the ACM from the SRDF which is what we want,
+  // and to avoid overwriting it with a blank ACM we first copy the existing ACM into the scene.
+  auto const acm = planning_scene->getAllowedCollisionMatrix();
+  acm.getMessage(scene_msg.allowed_collision_matrix);
   planning_scene->setPlanningSceneMsg(scene_msg);
 
   auto state = planning_scene->getCurrentStateNonConst();
 
   state.update();  // update FK
 
+  moveit_msgs::PlanningScene scene_msg_viz;
+  planning_scene->getPlanningSceneMsg(scene_msg_viz);
+  if (viz) {
+    wait_for_connection(scene_pub);
+    scene_pub.publish(scene_msg_viz);
+  }
+
+  const moveit::core::JointModelGroup *jmg = state.getJointModelGroup(group_name);
+
+  // check that the tool names are in the group
+  auto const names = jmg->getLinkModelNames();
+  for (auto const &[name, p] : goal_positions) {
+    if (name == jmg->getEndEffectorName()) {
+      continue;
+    }
+    if (std::find(names.cbegin(), names.cend(), name) == names.cend()) {
+      ROS_FATAL_STREAM_NAMED(LOGNAME, "Tool name " << name << " not in group " << group_name);
+      throw std::runtime_error("Tool name not in group");
+    }
+  }
+
   // Solve IK
   auto opts = std::make_unique<bio_ik::BioIKKinematicsQueryOptions>();
   opts->replace = true;                       // needed to replace the default goals!!!
   opts->return_approximate_solution = false;  // optional
+  opts->goals.emplace_back(std::make_unique<bio_ik::MinimalDisplacementGoal>(0.01));
   for (auto const &[name, p] : goal_positions) {
     tf2::Vector3 position(p(0), p(1), p(2));
     opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>(name, position));
   }
 
-  const moveit::core::JointModelGroup *jmg = state.getJointModelGroup(group_name);
-
   // NOTE: could add collision checking to the IK callback here, but I don't think it's necessary because the RRT is
   //     already doing collision checking.
   moveit::core::GroupStateValidityCallbackFn state_valid_cb =
-      [](moveit::core::RobotState *robot_state, const moveit::core::JointModelGroup *joint_group,
-         const double *joint_group_variable_values) { return true; };
+      [&](moveit::core::RobotState *robot_state, const moveit::core::JointModelGroup *joint_group,
+          const double *joint_group_variable_values) { return planning_scene->isStateValid(*robot_state); };
 
   planning_interface::MotionPlanRequest req;
   req.group_name = group_name;
 
-  for (auto i{0}; i < 30; ++i) {
-    state.setToRandomPositionsNearBy(jmg, state, 0.25);
+  moveit_msgs::RobotTrajectory ik_as_traj_msg;
+  ik_as_traj_msg.joint_trajectory.joint_names = jmg->getActiveJointModelNames();
+  auto const max_ik_attempts = 50;
+  auto const max_ik_solutions = 15;
+  for (auto i{0}; i < max_ik_attempts; ++i) {
+    state.setToRandomPositionsNearBy(jmg, state, 0.5);
     auto const ok = state.setFromIK(jmg,                            // joints to be used for IK
                                     EigenSTL::vector_Isometry3d(),  // this isn't used, goals are described in opts
                                     std::vector<std::string>(),     // names of the end-effector links
@@ -66,94 +113,101 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene cons
     if (!ok) {
       continue;
     }
-
-    visual_tools->publishRobotState(state, rvt::CYAN);
+    if (req.goal_constraints.size() >= max_ik_solutions) {
+      ROS_DEBUG_STREAM_NAMED(LOGNAME,
+                             "Found " << req.goal_constraints.size() << " IK solutions, considering this enough.");
+      break;
+    }
 
     moveit_msgs::Constraints joints_goal_constraint;
+    trajectory_msgs::JointTrajectoryPoint ik_as_traj_point_msg;
     for (auto const &n : jmg->getActiveJointModelNames()) {
       moveit_msgs::JointConstraint joint_constraint;
       joint_constraint.joint_name = n;
       joint_constraint.position = state.getVariablePosition(n);
-      joint_constraint.tolerance_above = deg2rad(0.5);
-      joint_constraint.tolerance_below = deg2rad(0.5);
+      joint_constraint.tolerance_above = deg2rad(1);
+      joint_constraint.tolerance_below = deg2rad(1);
       joint_constraint.weight = 1.0;
       joints_goal_constraint.joint_constraints.push_back(joint_constraint);
+      ik_as_traj_point_msg.positions.push_back(joint_constraint.position);
     }
 
     req.goal_constraints.push_back(joints_goal_constraint);
+
+    ik_as_traj_point_msg.time_from_start = ros::Duration(0.1 * i);
+    ik_as_traj_msg.joint_trajectory.points.push_back(ik_as_traj_point_msg);
   }
 
+  moveit_msgs::DisplayTrajectory disp_ik_as_traj_msg;
+  disp_ik_as_traj_msg.model_id = robot_model->getName();
+  disp_ik_as_traj_msg.trajectory.push_back(ik_as_traj_msg);
+  disp_ik_as_traj_msg.trajectory_start = scene_msg.robot_state;
+
+  if (viz) {
+    wait_for_connection(ik_traj_pub);
+    ik_traj_pub.publish(disp_ik_as_traj_msg);
+  }
+
+  if (req.goal_constraints.empty()) {
+    moveit_msgs::MotionPlanResponse res_msg;
+    res_msg.error_code.val = moveit_msgs::MoveItErrorCodes::INVALID_GOAL_CONSTRAINTS;
+    return res_msg;
+  }
   ROS_INFO_STREAM_NAMED(LOGNAME, "Planning with " << req.goal_constraints.size() << " goal constraints");
 
   planning_interface::MotionPlanResponse res;
-  req.allowed_planning_time = 30.0;
+  req.allowed_planning_time = allowed_planning_time;
   planning_pipeline->generatePlan(planning_scene, req, res);
 
+  if (res.error_code_ == moveit_msgs::MoveItErrorCodes::SUCCESS) {
+    time_param_.computeTimeStamps(*res.trajectory_, 1.0, 1.0);
+  }
+
   moveit_msgs::MotionPlanResponse res_msg;
-  res.getMessage(res_msg);
+  res_msg.error_code = res.error_code_;
+  res_msg.group_name = "whole_body";
+  res_msg.trajectory_start = scene_msg.robot_state;
+  res_msg.planning_time = res.planning_time_;
+
+  if (res.error_code_ != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+    return res_msg;
+  }
+
+  // add in all the other active joints in the robot, so that it's easier to use this trajectory in python/mujoco
+  // where we don't have access to move groups.
+  auto const &all_joints = robot_model->getActiveJointModelNames();
+  res_msg.trajectory.joint_trajectory.joint_names = all_joints;
+  for (auto i{0}; i < res.trajectory_->getWayPointCount(); ++i) {
+    auto const & waypoint = res.trajectory_->getWayPoint(i);
+    auto const & waypoint_names = waypoint.getVariableNames();
+    trajectory_msgs::JointTrajectoryPoint point_msg;
+    point_msg.time_from_start.fromSec(res.trajectory_->getWayPointDurationFromStart(i));
+    // ensure positions matches the order of joint_names
+    for (auto j{0}; j < all_joints.size(); ++j) {
+      auto const &joint_name = all_joints[j];
+      if (std::find(waypoint_names.cbegin(), waypoint_names.cend(), joint_name) != waypoint_names.cend()) {
+        point_msg.positions.push_back(waypoint.getVariablePosition(joint_name));
+        point_msg.velocities.push_back(waypoint.getVariableVelocity(joint_name));
+        point_msg.accelerations.push_back(waypoint.getVariableAcceleration(joint_name));
+      }
+      else {
+        point_msg.positions.push_back(0);
+        point_msg.velocities.push_back(0);
+        point_msg.accelerations.push_back(0);
+      }
+    }
+    res_msg.trajectory.joint_trajectory.points.push_back(point_msg);
+  }
 
   return res_msg;
 }
 
-int main(int argc, char **argv) {
-  ros::init(argc, argv, "planning_demo");
+void RRTPlanner::display_result(moveit_msgs::MotionPlanResponse const &res_msg) {
+  moveit_msgs::DisplayTrajectory disp_res_msg;
+  disp_res_msg.model_id = robot_model->getName();
+  disp_res_msg.trajectory.push_back(res_msg.trajectory);
+  disp_res_msg.trajectory_start = res_msg.trajectory_start;
 
-  std::string const group_name = "right_arm";
-
-  auto planner = RRTPlanner();
-
-  robot_state::RobotState state(planner.robot_model);
-  // NOTE q could be passed in
-  std::vector<double> q(state.getVariableCount(), 0.0);
-
-  moveit_msgs::PlanningScene scene_msg;
-  scene_msg.is_diff = false;
-  scene_msg.robot_state.is_diff = false;
-  moveit::core::robotStateToRobotStateMsg(state, scene_msg.robot_state);
-  scene_msg.world.collision_objects.resize(1);
-  auto &co = scene_msg.world.collision_objects[0];
-  co.id = "box1";
-  co.header.frame_id = "robot_root";
-  co.pose.orientation.w = 1.0;
-  co.primitive_poses.resize(1);
-  auto &pose = co.primitive_poses[0];
-  pose.orientation.w = 1.0;
-  pose.position.x = 0.2;
-  pose.position.y = 0.7;
-  pose.position.z = 0.5;
-  co.primitives.resize(1);
-  auto &shape = co.primitives[0];
-  shape.dimensions.resize(3);
-  shape.dimensions[0] = 0.1;
-  shape.dimensions[1] = 0.2;
-  shape.dimensions[2] = 0.5;
-  shape.type = shape_msgs::SolidPrimitive::BOX;
-
-  auto scene_pub = planner.nh.advertise<moveit_msgs::PlanningScene>("scene_viz", 10);
-
-  for (auto i = 0; i < 10; ++i) {
-    scene_pub.publish(scene_msg);
-    usleep(100000);
-  }
-
-  return 0;
-
-  std::map<std::string, Eigen::Vector3d> goal_positions{
-      //      {"left_tool", Eigen::Vector3d(-0.2, 0.8, 0.7)},
-      {"right_tool", Eigen::Vector3d(0.2, 0.8, 0.7)},
-  };
-
-  auto const res_msg = planner.plan(scene_msg, group_name, goal_positions);
-
-  moveit_msgs::DisplayTrajectory display_traj_msg;
-  display_traj_msg.model_id = planner.robot_model->getName();
-  display_traj_msg.trajectory_start = res_msg.trajectory_start;
-  display_traj_msg.trajectory.push_back(res_msg.trajectory);
-
-  for (auto i = 0; i < 10; ++i) {
-    planner.visual_tools->publishTrajectoryPath(display_traj_msg);
-    usleep(100000);
-  }
-
-  return 0;
+  wait_for_connection(sln_traj_pub);
+  sln_traj_pub.publish(disp_res_msg);
 }
