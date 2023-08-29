@@ -13,12 +13,13 @@ constexpr double deg2rad(double deg) { return deg * M_PI / 180.0; }
 
 void seedOmpl(int seed) { ompl::RNG::setSeed(seed); }
 
-void wait_for_connection(ros::Publisher const &pub) {
+void wait_for_connection(ros::Publisher &pub) {
   auto const t0 = ros::Time::now();
   while (pub.getNumSubscribers() < 1) {
-    ROS_DEBUG_STREAM_NAMED(LOGNAME, "Waiting for subscriber on topic " << pub.getTopic());
+    ROS_INFO_STREAM_NAMED(LOGNAME, "Waiting for subscriber on topic " << pub.getTopic());
     auto const dt = ros::Time::now() - t0;
     if (dt > ros::Duration(5)) {
+      ROS_INFO_STREAM_NAMED(LOGNAME, "Gave up!");
       break;
     }
     ros::Duration(0.1).sleep();
@@ -32,6 +33,7 @@ RRTPlanner::RRTPlanner() {
   robot_model_loader = std::make_shared<robot_model_loader::RobotModelLoader>("hdt_michigan/robot_description");
   robot_model = robot_model_loader->getModel();
 
+  // This normally gets set by ompl_planning.yaml, but we set it here in case it's not set
   nh.setParam("planning_plugin", "ompl_interface/OMPLPlanner");
 
   planning_pipeline = std::make_shared<planning_pipeline::PlanningPipeline>(robot_model, nh);
@@ -44,25 +46,33 @@ RRTPlanner::RRTPlanner() {
   scene_pub = nh.advertise<moveit_msgs::PlanningScene>("scene_viz", 10);
 }
 
-moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
-                                                 std::map<std::string, Eigen::Vector3d> const &goal_positions,
-                                                 bool viz, double allowed_planning_time) {
-  auto planning_scene = std::make_shared<planning_scene::PlanningScene>(robot_model);
+bool RRTPlanner::is_state_valid(moveit_msgs::PlanningScene scene_msg) {
+  auto planning_scene = get_planning_scene(scene_msg, robot_model);
+  auto const &state = planning_scene->getCurrentState();
+  return planning_scene->isStateValid(state);
+}
 
+planning_scene::PlanningScenePtr RRTPlanner::get_planning_scene(moveit_msgs::PlanningScene scene_msg,
+                                                                robot_model::RobotModelPtr robot_model) {
+  auto planning_scene = std::make_shared<planning_scene::PlanningScene>(robot_model);
   // The planning scene will automatically pull the ACM from the SRDF which is what we want,
   // and to avoid overwriting it with a blank ACM we first copy the existing ACM into the scene.
   auto const acm = planning_scene->getAllowedCollisionMatrix();
   acm.getMessage(scene_msg.allowed_collision_matrix);
   planning_scene->setPlanningSceneMsg(scene_msg);
-
+  return planning_scene;
+}
+moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
+                                                 std::map<std::string, Eigen::Vector3d> const &goal_positions, bool viz,
+                                                 double allowed_planning_time, double pos_noise) {
+  auto const planning_scene = get_planning_scene(scene_msg, robot_model);
   auto state = planning_scene->getCurrentStateNonConst();
-
   state.update();  // update FK
 
   moveit_msgs::PlanningScene scene_msg_viz;
   planning_scene->getPlanningSceneMsg(scene_msg_viz);
   if (viz) {
-    wait_for_connection(scene_pub);
+    //    wait_for_connection(scene_pub);
     scene_pub.publish(scene_msg_viz);
   }
 
@@ -80,30 +90,36 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     }
   }
 
-  // Solve IK
-  auto opts = std::make_unique<bio_ik::BioIKKinematicsQueryOptions>();
-  opts->replace = true;                       // needed to replace the default goals!!!
-  opts->return_approximate_solution = false;  // optional
-  opts->goals.emplace_back(std::make_unique<bio_ik::MinimalDisplacementGoal>(0.01));
-  for (auto const &[name, p] : goal_positions) {
-    tf2::Vector3 position(p(0), p(1), p(2));
-    opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>(name, position));
-  }
-
-  // NOTE: could add collision checking to the IK callback here, but I don't think it's necessary because the RRT is
-  //     already doing collision checking.
-  moveit::core::GroupStateValidityCallbackFn state_valid_cb =
-      [&](moveit::core::RobotState *robot_state, const moveit::core::JointModelGroup *joint_group,
-          const double *joint_group_variable_values) { return planning_scene->isStateValid(*robot_state); };
-
   planning_interface::MotionPlanRequest req;
   req.group_name = group_name;
 
+  auto const &ik_t0 = ros::Time::now();
   moveit_msgs::RobotTrajectory ik_as_traj_msg;
   ik_as_traj_msg.joint_trajectory.joint_names = jmg->getActiveJointModelNames();
   auto const max_ik_attempts = 50;
   auto const max_ik_solutions = 15;
+
+  moveit::core::GroupStateValidityCallbackFn state_valid_cb = [&](moveit::core::RobotState *robot_state,
+                                                                  const moveit::core::JointModelGroup *joint_group,
+                                                                  const double *joint_group_variable_values) {
+    robot_state->setJointGroupPositions(joint_group, joint_group_variable_values);
+    robot_state->update();
+    return planning_scene->isStateValid(*robot_state);
+  };
+
   for (auto i{0}; i < max_ik_attempts; ++i) {
+    // Solve IK
+    auto opts = std::make_unique<bio_ik::BioIKKinematicsQueryOptions>();
+    opts->replace = true;                       // needed to replace the default goals!!!
+    opts->return_approximate_solution = false;  // optional
+    opts->goals.emplace_back(std::make_unique<bio_ik::MinimalDisplacementGoal>(0.01));
+    for (auto const &[name, p] : goal_positions) {
+      Eigen::Vector3d const noisy_p = p.array() + (Eigen::Vector3d::Random().array() * pos_noise);
+      tf2::Vector3 position(noisy_p(0), noisy_p(1), noisy_p(2));
+      ROS_DEBUG_STREAM_NAMED(LOGNAME, "Adding goal " << name << " at " << noisy_p);
+      opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>(name, position));
+    }
+
     state.setToRandomPositionsNearBy(jmg, state, 0.5);
     auto const ok = state.setFromIK(jmg,                            // joints to be used for IK
                                     EigenSTL::vector_Isometry3d(),  // this isn't used, goals are described in opts
@@ -113,9 +129,8 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     if (!ok) {
       continue;
     }
+
     if (req.goal_constraints.size() >= max_ik_solutions) {
-      ROS_DEBUG_STREAM_NAMED(LOGNAME,
-                             "Found " << req.goal_constraints.size() << " IK solutions, considering this enough.");
       break;
     }
 
@@ -125,8 +140,8 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
       moveit_msgs::JointConstraint joint_constraint;
       joint_constraint.joint_name = n;
       joint_constraint.position = state.getVariablePosition(n);
-      joint_constraint.tolerance_above = deg2rad(1);
-      joint_constraint.tolerance_below = deg2rad(1);
+      joint_constraint.tolerance_above = deg2rad(1.5);
+      joint_constraint.tolerance_below = deg2rad(1.5);
       joint_constraint.weight = 1.0;
       joints_goal_constraint.joint_constraints.push_back(joint_constraint);
       ik_as_traj_point_msg.positions.push_back(joint_constraint.position);
@@ -144,10 +159,15 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   disp_ik_as_traj_msg.trajectory_start = scene_msg.robot_state;
 
   if (viz) {
-    wait_for_connection(ik_traj_pub);
+    //    wait_for_connection(ik_traj_pub);
     ik_traj_pub.publish(disp_ik_as_traj_msg);
   }
 
+  auto const &ik_t1 = ros::Time::now();
+  auto const &ik_dt = ik_t1 - ik_t0;
+  ROS_INFO_STREAM_NAMED(LOGNAME, "IK took " << ik_dt.toSec() << " seconds");
+
+  ROS_DEBUG_STREAM_NAMED(LOGNAME, "Found " << req.goal_constraints.size() << " IK solutions.");
   if (req.goal_constraints.empty()) {
     moveit_msgs::MotionPlanResponse res_msg;
     res_msg.error_code.val = moveit_msgs::MoveItErrorCodes::INVALID_GOAL_CONSTRAINTS;
@@ -178,8 +198,8 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   auto const &all_joints = robot_model->getActiveJointModelNames();
   res_msg.trajectory.joint_trajectory.joint_names = all_joints;
   for (auto i{0}; i < res.trajectory_->getWayPointCount(); ++i) {
-    auto const & waypoint = res.trajectory_->getWayPoint(i);
-    auto const & waypoint_names = waypoint.getVariableNames();
+    auto const &waypoint = res.trajectory_->getWayPoint(i);
+    auto const &waypoint_names = waypoint.getVariableNames();
     trajectory_msgs::JointTrajectoryPoint point_msg;
     point_msg.time_from_start.fromSec(res.trajectory_->getWayPointDurationFromStart(i));
     // ensure positions matches the order of joint_names
@@ -189,8 +209,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
         point_msg.positions.push_back(waypoint.getVariablePosition(joint_name));
         point_msg.velocities.push_back(waypoint.getVariableVelocity(joint_name));
         point_msg.accelerations.push_back(waypoint.getVariableAcceleration(joint_name));
-      }
-      else {
+      } else {
         point_msg.positions.push_back(0);
         point_msg.velocities.push_back(0);
         point_msg.accelerations.push_back(0);

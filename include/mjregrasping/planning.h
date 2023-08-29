@@ -30,15 +30,20 @@ class RRTPlanner {
    */
   moveit_msgs::MotionPlanResponse plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
                                        std::map<std::string, Eigen::Vector3d> const &goal_positions, bool viz = true,
-                                       double allowed_planning_time = 5.0);
+                                       double const allowed_planning_time = 5.0, double const pos_noise = 0.001);
+
+  planning_scene::PlanningScenePtr get_planning_scene(moveit_msgs::PlanningScene scene_msg,
+                                                      robot_model::RobotModelPtr robot_model);
+
+  bool is_state_valid(moveit_msgs::PlanningScene scene_msg);
 
   void display_result(moveit_msgs::MotionPlanResponse const &res_msg);
 
   ros::NodeHandle nh;
-  std::shared_ptr<robot_model_loader::RobotModelLoader> robot_model_loader;
-  std::shared_ptr<robot_model::RobotModel> robot_model;
-  std::shared_ptr<planning_pipeline::PlanningPipeline> planning_pipeline;
-  std::shared_ptr<moveit_visual_tools::MoveItVisualTools> visual_tools;
+  robot_model_loader::RobotModelLoaderPtr robot_model_loader;
+  robot_model::RobotModelPtr robot_model;
+  planning_pipeline::PlanningPipelinePtr planning_pipeline;
+  moveit_visual_tools::MoveItVisualToolsPtr visual_tools;
   ros::Publisher ik_traj_pub;
   ros::Publisher sln_traj_pub;
   ros::Publisher scene_pub;

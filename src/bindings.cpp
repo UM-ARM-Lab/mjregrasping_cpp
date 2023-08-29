@@ -19,6 +19,7 @@ PYBIND11_MODULE(pymjregrasping_cpp, m) {
   py::class_<RRTPlanner>(m, "RRTPlanner")
       .def(py::init<>())
       .def("plan", &RRTPlanner::plan, py::arg("scene_msg"), py::arg("group_name"), py::arg("goal_positions"),
-           py::arg("viz") = true, py::arg("allowed_planning_time") = 5.0)
+           py::arg("viz") = true, py::arg("allowed_planning_time") = 5.0, py::arg("pos_noise") = 0.001)
+      .def("is_state_valid", &RRTPlanner::is_state_valid, py::arg("scene_msg"))
       .def("display_result", &RRTPlanner::display_result, py::arg("res_msg"));
 }
