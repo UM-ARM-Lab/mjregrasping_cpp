@@ -2,6 +2,9 @@
 #include <mjregrasping/planning.h>
 #include <moveit/kinematic_constraints/utils.h>
 #include <moveit_msgs/DisplayTrajectory.h>
+#include <arc_utilities/moveit_ostream_operators.hpp>
+#include <arc_utilities/moveit_pose_type.hpp>
+#include <arc_utilities/ostream_operators.hpp>
 #include <ompl/util/RandomNumbers.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
@@ -49,7 +52,18 @@ RRTPlanner::RRTPlanner() {
 bool RRTPlanner::is_state_valid(moveit_msgs::PlanningScene scene_msg) {
   auto planning_scene = get_planning_scene(scene_msg, robot_model);
   auto const &state = planning_scene->getCurrentState();
-  return planning_scene->isStateValid(state);
+  auto const is_valid = planning_scene->isStateValid(state);
+  if (!is_valid){
+    collision_detection::CollisionRequest collisionRequest;
+    collisionRequest.contacts = true;
+    collisionRequest.max_contacts = 1;
+    collisionRequest.max_contacts_per_pair = 1;
+    collision_detection::CollisionResult collisionResult;
+    planning_scene->checkCollision(collisionRequest, collisionResult, state);
+    ROS_DEBUG_STREAM_NAMED(LOGNAME + ".check_collision", "Collision Result: " << collisionResult);
+    return false;
+  }
+  return true;
 }
 
 planning_scene::PlanningScenePtr RRTPlanner::get_planning_scene(moveit_msgs::PlanningScene scene_msg,
