@@ -110,8 +110,8 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   auto const &ik_t0 = ros::Time::now();
   moveit_msgs::RobotTrajectory ik_as_traj_msg;
   ik_as_traj_msg.joint_trajectory.joint_names = jmg->getActiveJointModelNames();
-  auto const max_ik_attempts = 50;
-  auto const max_ik_solutions = 15;
+  auto const max_ik_attempts = 35;
+  auto const max_ik_solutions = 10;
 
   moveit::core::GroupStateValidityCallbackFn state_valid_cb = [&](moveit::core::RobotState *robot_state,
                                                                   const moveit::core::JointModelGroup *joint_group,
@@ -130,7 +130,6 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     for (auto const &[name, p] : goal_positions) {
       Eigen::Vector3d const noisy_p = p.array() + (Eigen::Vector3d::Random().array() * pos_noise);
       tf2::Vector3 position(noisy_p(0), noisy_p(1), noisy_p(2));
-      ROS_DEBUG_STREAM_NAMED(LOGNAME, "Adding goal " << name << " at " << noisy_p);
       opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>(name, position));
     }
 
@@ -140,11 +139,13 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
                                     std::vector<std::string>(),     // names of the end-effector links
                                     0,                              // take values from YAML
                                     state_valid_cb, *opts);
+
     if (!ok) {
       continue;
     }
 
     if (req.goal_constraints.size() >= max_ik_solutions) {
+      ROS_DEBUG_STREAM_NAMED(LOGNAME, "Exiting early");
       break;
     }
 
@@ -179,7 +180,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
 
   auto const &ik_t1 = ros::Time::now();
   auto const &ik_dt = ik_t1 - ik_t0;
-  ROS_INFO_STREAM_NAMED(LOGNAME, "IK took " << ik_dt.toSec() << " seconds");
+  ROS_INFO_STREAM_NAMED(LOGNAME + ".perf", "IK took " << ik_dt.toSec() << " seconds");
 
   ROS_DEBUG_STREAM_NAMED(LOGNAME, "Found " << req.goal_constraints.size() << " IK solutions.");
   if (req.goal_constraints.empty()) {
