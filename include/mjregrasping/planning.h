@@ -30,7 +30,9 @@ class RRTPlanner {
    */
   moveit_msgs::MotionPlanResponse plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
                                        std::map<std::string, Eigen::Vector3d> const &goal_positions, bool viz = true,
-                                       double const allowed_planning_time = 5.0, double const pos_noise = 0.001);
+                                       double const allowed_planning_time = 5.0, double const pos_noise = 0.001,
+                                       int const max_ik_attempts = 35, int const max_ik_solutions = 10,
+                                       double const joint_noise = 0.5);
 
   planning_scene::PlanningScenePtr get_planning_scene(moveit_msgs::PlanningScene scene_msg,
                                                       robot_model::RobotModelPtr robot_model);

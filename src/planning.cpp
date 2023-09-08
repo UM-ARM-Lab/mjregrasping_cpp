@@ -78,7 +78,8 @@ planning_scene::PlanningScenePtr RRTPlanner::get_planning_scene(moveit_msgs::Pla
 }
 moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
                                                  std::map<std::string, Eigen::Vector3d> const &goal_positions, bool viz,
-                                                 double allowed_planning_time, double pos_noise) {
+                                                 double allowed_planning_time, double pos_noise, int max_ik_attempts,
+                                                 int max_ik_solutions, double joint_noise) {
   auto const planning_scene = get_planning_scene(scene_msg, robot_model);
   auto state = planning_scene->getCurrentStateNonConst();
   state.update();  // update FK
@@ -110,8 +111,6 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   auto const &ik_t0 = ros::Time::now();
   moveit_msgs::RobotTrajectory ik_as_traj_msg;
   ik_as_traj_msg.joint_trajectory.joint_names = jmg->getActiveJointModelNames();
-  auto const max_ik_attempts = 35;
-  auto const max_ik_solutions = 10;
 
   moveit::core::GroupStateValidityCallbackFn state_valid_cb = [&](moveit::core::RobotState *robot_state,
                                                                   const moveit::core::JointModelGroup *joint_group,
@@ -133,7 +132,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
       opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>(name, position));
     }
 
-    state.setToRandomPositionsNearBy(jmg, state, 0.5);
+    state.setToRandomPositionsNearBy(jmg, state, joint_noise);
     auto const ok = state.setFromIK(jmg,                            // joints to be used for IK
                                     EigenSTL::vector_Isometry3d(),  // this isn't used, goals are described in opts
                                     std::vector<std::string>(),     // names of the end-effector links
@@ -168,6 +167,19 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     ik_as_traj_msg.joint_trajectory.points.push_back(ik_as_traj_point_msg);
   }
 
+  // Add a path constraint so that no joint can change by more than PI from it's current position
+  moveit_msgs::Constraints path_constraint;
+  for (auto const &n : jmg->getActiveJointModelNames()) {
+    moveit_msgs::JointConstraint joint_constraint;
+    joint_constraint.joint_name = n;
+    joint_constraint.position = state.getVariablePosition(n);
+    joint_constraint.tolerance_above = deg2rad(180);
+    joint_constraint.tolerance_below = deg2rad(180);
+    joint_constraint.weight = 1.0;
+    path_constraint.joint_constraints.push_back(joint_constraint);
+  }
+  req.path_constraints = path_constraint;
+
   moveit_msgs::DisplayTrajectory disp_ik_as_traj_msg;
   disp_ik_as_traj_msg.model_id = robot_model->getName();
   disp_ik_as_traj_msg.trajectory.push_back(ik_as_traj_msg);
@@ -200,7 +212,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
 
   moveit_msgs::MotionPlanResponse res_msg;
   res_msg.error_code = res.error_code_;
-  res_msg.group_name = "whole_body";
+  res_msg.group_name = group_name;
   res_msg.trajectory_start = scene_msg.robot_state;
   res_msg.planning_time = res.planning_time_;
 
