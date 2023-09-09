@@ -81,8 +81,8 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
                                                  double allowed_planning_time, double pos_noise, int max_ik_attempts,
                                                  int max_ik_solutions, double joint_noise) {
   auto const planning_scene = get_planning_scene(scene_msg, robot_model);
-  auto state = planning_scene->getCurrentStateNonConst();
-  state.update();  // update FK
+  auto ik_state = planning_scene->getCurrentStateNonConst();
+  ik_state.update();  // update FK
 
   moveit_msgs::PlanningScene scene_msg_viz;
   planning_scene->getPlanningSceneMsg(scene_msg_viz);
@@ -91,7 +91,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     scene_pub.publish(scene_msg_viz);
   }
 
-  const moveit::core::JointModelGroup *jmg = state.getJointModelGroup(group_name);
+  const moveit::core::JointModelGroup *jmg = ik_state.getJointModelGroup(group_name);
 
   // check that the tool names are in the group
   auto const names = jmg->getLinkModelNames();
@@ -125,15 +125,15 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     auto opts = std::make_unique<bio_ik::BioIKKinematicsQueryOptions>();
     opts->replace = true;                       // needed to replace the default goals!!!
     opts->return_approximate_solution = false;  // optional
-    opts->goals.emplace_back(std::make_unique<bio_ik::MinimalDisplacementGoal>(0.01));
+    opts->goals.emplace_back(std::make_unique<bio_ik::MinimalDisplacementGoal>(0.1));
     for (auto const &[name, p] : goal_positions) {
       Eigen::Vector3d const noisy_p = p.array() + (Eigen::Vector3d::Random().array() * pos_noise);
       tf2::Vector3 position(noisy_p(0), noisy_p(1), noisy_p(2));
       opts->goals.emplace_back(std::make_unique<bio_ik::PositionGoal>(name, position));
     }
 
-    state.setToRandomPositionsNearBy(jmg, state, joint_noise);
-    auto const ok = state.setFromIK(jmg,                            // joints to be used for IK
+    ik_state.setToRandomPositionsNearBy(jmg, ik_state, joint_noise);
+    auto const ok = ik_state.setFromIK(jmg,                            // joints to be used for IK
                                     EigenSTL::vector_Isometry3d(),  // this isn't used, goals are described in opts
                                     std::vector<std::string>(),     // names of the end-effector links
                                     0,                              // take values from YAML
@@ -153,7 +153,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     for (auto const &n : jmg->getActiveJointModelNames()) {
       moveit_msgs::JointConstraint joint_constraint;
       joint_constraint.joint_name = n;
-      joint_constraint.position = state.getVariablePosition(n);
+      joint_constraint.position = ik_state.getVariablePosition(n);
       joint_constraint.tolerance_above = deg2rad(1.5);
       joint_constraint.tolerance_below = deg2rad(1.5);
       joint_constraint.weight = 1.0;
@@ -168,11 +168,12 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   }
 
   // Add a path constraint so that no joint can change by more than PI from it's current position
+  auto const &initial_state = planning_scene->getCurrentState();
   moveit_msgs::Constraints path_constraint;
   for (auto const &n : jmg->getActiveJointModelNames()) {
     moveit_msgs::JointConstraint joint_constraint;
     joint_constraint.joint_name = n;
-    joint_constraint.position = state.getVariablePosition(n);
+    joint_constraint.position = initial_state.getVariablePosition(n);
     joint_constraint.tolerance_above = deg2rad(180);
     joint_constraint.tolerance_below = deg2rad(180);
     joint_constraint.weight = 1.0;
