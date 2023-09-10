@@ -124,6 +124,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     return planning_scene->isStateValid(*robot_state);
   };
 
+  auto joint_noise_i = joint_noise;
   for (auto i{0}; i < max_ik_attempts; ++i) {
     // Solve IK
     auto opts = std::make_unique<bio_ik::BioIKKinematicsQueryOptions>();
@@ -137,7 +138,8 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
       ROS_DEBUG_STREAM_NAMED(LOGNAME + ".goals", "Adding goal " << name << " " << position.x() << " " << position.y() << " " << position.z());
     }
 
-    ik_state.setToRandomPositionsNearBy(jmg, ik_state, joint_noise);
+    ROS_DEBUG_STREAM_NAMED(LOGNAME + ".joint_noise", "joint_noise_i: " << joint_noise_i);
+    ik_state.setToRandomPositionsNearBy(jmg, initial_state, joint_noise_i);
     auto const ok = ik_state.setFromIK(jmg,                            // joints to be used for IK
                                     EigenSTL::vector_Isometry3d(),  // this isn't used, goals are described in opts
                                     std::vector<std::string>(),     // names of the end-effector links
@@ -145,6 +147,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
                                     state_valid_cb, *opts);
 
     if (!ok) {
+      joint_noise_i *= 1.01;
       continue;
     }
 
