@@ -76,6 +76,7 @@ planning_scene::PlanningScenePtr RRTPlanner::get_planning_scene(moveit_msgs::Pla
   planning_scene->setPlanningSceneMsg(scene_msg);
   return planning_scene;
 }
+
 moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scene_msg, std::string const &group_name,
                                                  std::map<std::string, Eigen::Vector3d> const &goal_positions, bool viz,
                                                  double allowed_planning_time, double pos_noise, int max_ik_attempts,
@@ -104,6 +105,9 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
       throw std::runtime_error("Tool name not in group");
     }
   }
+
+  double dq_lim = 220;
+  auto const &initial_state = planning_scene->getCurrentState();
 
   planning_interface::MotionPlanRequest req;
   req.group_name = group_name;
@@ -143,6 +147,24 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
       continue;
     }
 
+    // Also check if any of the joints in ik_state are more than dq_lim degrees from their initial position,
+    // otherwise they will be incompatible with the path constraint below.
+    bool is_too_far = false;
+    for (auto const &n : jmg->getActiveJointModelNames()) {
+      auto const &initial_position = initial_state.getVariablePosition(n);
+      auto const &ik_position = ik_state.getVariablePosition(n);
+      auto const &diff = ik_position - initial_position;
+      if (diff > deg2rad(dq_lim)) {
+        is_too_far = true;
+        break;
+      }
+    }
+
+    if (is_too_far) {
+      ROS_DEBUG_STREAM_NAMED(LOGNAME, "Discarding IK sln that is too far from current state");
+      continue;
+    }
+
     if (req.goal_constraints.size() >= max_ik_solutions) {
       ROS_DEBUG_STREAM_NAMED(LOGNAME, "Exiting early");
       break;
@@ -168,14 +190,13 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   }
 
   // Add a path constraint so that no joint can change by more than PI from it's current position
-  auto const &initial_state = planning_scene->getCurrentState();
   moveit_msgs::Constraints path_constraint;
   for (auto const &n : jmg->getActiveJointModelNames()) {
     moveit_msgs::JointConstraint joint_constraint;
     joint_constraint.joint_name = n;
     joint_constraint.position = initial_state.getVariablePosition(n);
-    joint_constraint.tolerance_above = deg2rad(180);
-    joint_constraint.tolerance_below = deg2rad(180);
+    joint_constraint.tolerance_above = deg2rad(dq_lim);
+    joint_constraint.tolerance_below = deg2rad(dq_lim);
     joint_constraint.weight = 1.0;
     path_constraint.joint_constraints.push_back(joint_constraint);
   }
