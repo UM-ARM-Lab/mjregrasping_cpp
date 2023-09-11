@@ -131,6 +131,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     opts->replace = true;                       // needed to replace the default goals!!!
     opts->return_approximate_solution = false;  // optional
     opts->goals.emplace_back(std::make_unique<bio_ik::MinimalDisplacementGoal>(0.01));
+    opts->goals.emplace_back(std::make_unique<bio_ik::AvoidJointLimitsGoal>());
     for (auto const &[name, p] : goal_positions) {
       Eigen::Vector3d const noisy_p = p.array() + (Eigen::Vector3d::Random().array() * pos_noise);
       tf2::Vector3 position(noisy_p(0), noisy_p(1), noisy_p(2));
