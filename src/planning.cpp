@@ -106,7 +106,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
     }
   }
 
-  double dq_lim = 220;
+  double dq_lim = 280;
   auto const &initial_state = planning_scene->getCurrentState();
 
   planning_interface::MotionPlanRequest req;
@@ -147,7 +147,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
                                     state_valid_cb, *opts);
 
     if (!ok) {
-      joint_noise_i *= 1.01;
+      joint_noise_i *= 1.008;
       continue;
     }
 
