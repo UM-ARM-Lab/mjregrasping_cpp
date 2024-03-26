@@ -233,7 +233,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   req.allowed_planning_time = allowed_planning_time;
   planning_pipeline->generatePlan(planning_scene, req, res);
 
-  if (res.error_code_ == moveit_msgs::MoveItErrorCodes::SUCCESS) {
+  if (res.error_code_.val == moveit_msgs::MoveItErrorCodes::SUCCESS) {
     time_param_.computeTimeStamps(*res.trajectory_, 1.0, 1.0);
   }
 
@@ -243,7 +243,7 @@ moveit_msgs::MotionPlanResponse RRTPlanner::plan(moveit_msgs::PlanningScene scen
   res_msg.trajectory_start = scene_msg.robot_state;
   res_msg.planning_time = res.planning_time_;
 
-  if (res.error_code_ != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+  if (res.error_code_.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
     return res_msg;
   }
 
